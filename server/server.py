@@ -3,7 +3,7 @@ import json, asyncio, sys
 from pathlib import Path
 import websockets
 
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, urlencode
 
 from primitives import (
     run_applescript, focused_typing, open_gmail_compose,
@@ -21,6 +21,24 @@ def now(): return datetime.datetime.now().strftime("%H:%M:%S")
 
 REPEAT_BLOCKLIST = {"type_text", "mailto_compose"}  # intents we won't auto-repeat
 
+# ===== Browser preference state (active browser selection) =====
+PREFERRED_BROWSER = None  # "Safari" or any app in CHROME_FAMILY
+
+def set_preferred_browser(name: str):
+  """Set the active browser preference. Accepts Safari or any of CHROME_FAMILY names."""
+  global PREFERRED_BROWSER
+  if not name:
+      return
+  n = str(name).strip()
+  if n.lower() in {"safari", "apple safari"}:
+      PREFERRED_BROWSER = "Safari"
+  elif n in CHROME_FAMILY or n.lower() in {"google chrome", "chrome", "brave browser", "microsoft edge", "vivaldi"}:
+      # normalize common lowercase to canonical names
+      if n.lower() == "chrome": n = "Google Chrome"
+      elif n.lower() == "brave": n = "Brave Browser"
+      elif n.lower() == "edge": n = "Microsoft Edge"
+      PREFERRED_BROWSER = n
+
 # ===== Gesture → Action tuning =====
 # --- at top of file
 import pyautogui
@@ -31,14 +49,180 @@ MOUSE_MODE = "cursor"           # cursor (not scroll)
 CURSOR_PIXELS_PER_SEC = 1800  # a touch faster for gyro control
 CURSOR_DEAD_SPEED = 0.03      # slightly larger deadband to remove jitter
 
-# --- Tilt-angle control (degrees and px/s), per prompt ---
-DEAD_ZONE_DEG = 10.0
-V_MIN = 120.0          # px/s at threshold
-V_MAX = 520.0          # px/s at saturation
-SAT_ANGLE_DEG = 25.0   # degrees beyond the 5° dead zone where speed saturates
-ALPHA_ANGLE = 0.2      # low-pass on angles
-MAX_STEP_PX = 16.0     # clamp per-tick pixel move
-UPDATE_HZ = 30.0       # target update frequency (informational)
+# --- Frontmost app + browser/tab helpers ---------------------------------------------------------
+
+def get_frontmost_app_name() -> str:
+    """Return the name of the frontmost macOS app, or empty string on failure."""
+    script = '''
+    tell application "System Events"
+        set frontApp to name of first application process whose frontmost is true
+    end tell
+    return frontApp
+    '''
+    try:
+        name = run_applescript(script)
+        return str(name).strip()
+    except Exception as e:
+        print("frontmost app error:", e)
+        return ""
+
+
+def applescript_open_url_in_chrome_family(app_name: str, url: str) -> int:
+    """Open a URL in a Chromium-based browser via AppleScript tab API."""
+    script = f'''
+    try
+        tell application "{app_name}"
+            activate
+            if (count of windows) = 0 then make new window
+            set newTab to make new tab at end of tabs of front window
+            set URL of newTab to "{url}"
+        end tell
+        return 0
+    on error errText number errNum
+        return errNum
+    end try
+    '''
+    return int(run_applescript(script))
+
+
+def applescript_open_url_in_safari(url: str) -> int:
+    script = f'''
+    try
+        tell application "Safari"
+            activate
+            if (count of windows) = 0 then make new document
+            tell window 1
+                set current tab to (make new tab with properties {{URL:"{url}"}})
+            end tell
+        end tell
+        return 0
+    on error errText number errNum
+        return errNum
+    end try
+    '''
+    return int(run_applescript(script))
+
+
+CHROME_FAMILY = {
+    "Google Chrome",
+    "Brave Browser",
+    "Microsoft Edge",
+    "Vivaldi",
+}
+
+def open_url_in_browser(url: str, browser: str) -> str:
+    """Open URL in the specific browser name provided."""
+    if browser == "Safari":
+        rc = applescript_open_url_in_safari(url)
+        if rc == 0:
+            return "opened_url_safari"
+    elif browser in CHROME_FAMILY:
+        rc = applescript_open_url_in_chrome_family(browser, url)
+        if rc == 0:
+            return f"opened_url_{browser.lower().replace(' ', '_')}"
+    # If we get here, try a generic open -a
+    import subprocess, shlex
+    try:
+        subprocess.check_call(f"open -a {shlex.quote(browser)} {shlex.quote(url)}", shell=True)
+        return f"opened_url_{browser.lower().replace(' ', '_')}_fallback"
+    except Exception as e:
+        print("open -a fallback error:", e)
+        # Final fallback: default handler
+        try:
+            subprocess.check_call(f"open {shlex.quote(url)}", shell=True)
+            return "opened_url_default_fallback"
+        except Exception as e2:
+            print("open default fallback error:", e2)
+            return "open_url_failed"
+
+def open_url_in_active_browser(url: str) -> str:
+    """
+    Open URL in the active browser:
+    - use PREFERRED_BROWSER if set
+    - else use frontmost app if it is a browser
+    - else use system default
+    """
+    if PREFERRED_BROWSER:
+        return open_url_in_browser(url, PREFERRED_BROWSER)
+    front = get_frontmost_app_name()
+    if front == "Safari" or front in CHROME_FAMILY:
+        return open_url_in_browser(url, front)
+    # fall back to default if no browser is frontmost
+    import subprocess, shlex
+    try:
+        subprocess.check_call(f"open {shlex.quote(url)}", shell=True)
+        return "opened_url_default"
+    except Exception as e:
+        print("open default error:", e)
+        return "open_url_failed"
+
+def open_url_in_frontmost_browser(url: str) -> str:
+    # Backwards-compat shim - now respects preferred browser if set
+    return open_url_in_active_browser(url)
+
+def open_mac_app(app_raw: str) -> int:
+    """Open arbitrary macOS app by name or bundle id; return 0 on success, nonzero on failure."""
+    app = app_raw.strip()
+    if not app:
+        return 1
+    if "." in app:  # looks like bundle id, e.g., "zoom.us"
+        script = f'''
+        try
+            tell application id "{app}"
+                if it is not running then launch
+                activate
+            end tell
+            return 0
+        on error errText number errNum
+            return errNum
+        end try
+        '''
+    else:
+        script = f'''
+        try
+            tell application "{app}"
+                if it is not running then launch
+                activate
+            end tell
+            return 0
+        on error errText number errNum
+            return errNum
+        end try
+        '''
+    rc = run_applescript(script)
+    if str(rc).strip() == "0":
+        return 0
+    # Fallback: open -a "App"
+    import subprocess, shlex
+    try:
+        subprocess.check_call(f"open -a {shlex.quote(app)}", shell=True)
+        return 0
+    except Exception as e:
+        print("open_app error:", e)
+        return 1
+
+def _gmail_compose_url(to: str = "", subject: str = "", body: str = "") -> str:
+    params = {
+        "view": "cm",
+        "fs": "1",
+        "to": to or "",
+        "su": subject or "",
+        "body": body or "",
+    }
+    return "https://mail.google.com/mail/?" + urlencode(params, doseq=False, safe=":/?&=")
+
+def gmail_compose_in_active_browser(to: str, subject: str, body: str, send: bool = False) -> str:
+    url = _gmail_compose_url(to, subject, body)
+    res = open_url_in_active_browser(url)
+    # small delay so the compose UI is ready
+    time.sleep(0.8)
+    if send:
+        try:
+            pyautogui.hotkey("command", "enter")
+        except Exception as e:
+            print("gmail send hotkey error:", e)
+            return "gmail_send_failed"
+    return "gmail_compose_opened" if res.startswith("opened_url") else "gmail_compose_failed"
 
 class MouseController:
     def __init__(self):
@@ -49,17 +233,8 @@ class MouseController:
         self.last_input_t = time.monotonic()
         self.idle_timeout = 0.04  # faster decay when stream stops
 
-        # filtered angles (degrees)
-        self.roll_f = 0.0
-        self.pitch_f = 0.0
-
     def _clamp(self, x, lo, hi):
         return max(lo, min(hi, x))
-
-    def _axis_speed(self, angle_deg: float) -> float:
-        eff = max(0.0, abs(angle_deg) - DEAD_ZONE_DEG)
-        n = min(1.0, eff / SAT_ANGLE_DEG)
-        return V_MIN + (V_MAX - V_MIN) * (n * n)
 
     def update_cursor(self, vx, vy, dt):
         now = time.monotonic()
@@ -98,49 +273,6 @@ class MouseController:
         except Exception as e:
             print("moveRel error:", e)
 
-    def update_cursor_from_angles(self, roll_deg: float, pitch_deg: float, dt: float):
-        # low-pass filter the angles
-        a = ALPHA_ANGLE
-        self.roll_f  = a * roll_deg  + (1 - a) * self.roll_f
-        self.pitch_f = a * pitch_deg + (1 - a) * self.pitch_f
-
-        # velocities (px/s) from filtered angles with 5° dead zone
-        # Choose a single dominant axis (no diagonals): whichever |angle| is larger wins
-        vx = 0.0
-        vy = 0.0
-        ax = abs(self.roll_f)
-        ay = abs(self.pitch_f)
-
-        # both inside dead zone → stop
-        if ax <= DEAD_ZONE_DEG and ay <= DEAD_ZONE_DEG:
-            vx = 0.0
-            vy = 0.0
-        elif ax >= ay:
-            # horizontal dominates
-            if ax > DEAD_ZONE_DEG:
-                vx = (1.0 if self.roll_f > 0 else -1.0) * self._axis_speed(self.roll_f)
-                vy = 0.0
-        else:
-            # vertical dominates; forward tilt (pitch > 0) moves cursor down (+y)
-            if ay > DEAD_ZONE_DEG:
-                vy = (1.0 if self.pitch_f > 0 else -1.0) * self._axis_speed(self.pitch_f)
-                vx = 0.0
-
-        # integrate to per-tick deltas and clamp
-        dx = vx * dt
-        dy = vy * dt
-
-        dx = self._clamp(dx, -MAX_STEP_PX, MAX_STEP_PX)
-        dy = self._clamp(dy, -MAX_STEP_PX, MAX_STEP_PX)
-
-        if dx == 0.0 and dy == 0.0:
-            return
-
-        try:
-            pyautogui.moveRel(dx, dy, duration=0)
-        except Exception as e:
-            print("moveRel error:", e)
-
     def click(self):
         try:
             pyautogui.mouseDown()
@@ -161,17 +293,6 @@ def handle_tilt_vector(payload: dict):
     MOUSE.update_cursor(vx, vy, dt)
     return "tilt_ok"
 
-def handle_tilt_angles(payload: dict):
-    # read roll and pitch angles in DEGREES; dt in seconds
-    # roll > 0 → right tilt; pitch > 0 → forward tilt (cursor down)
-    roll = float(payload.get("roll_deg", payload.get("roll", 0.0)))
-    pitch = float(payload.get("pitch_deg", payload.get("pitch", 0.0)))
-    dt = float(payload.get("dt", 1.0 / UPDATE_HZ))
-    if not (0.0005 <= dt <= 0.2):
-        dt = 1.0 / UPDATE_HZ
-    MOUSE.update_cursor_from_angles(roll, pitch, dt)
-    return "tilt_angles_ok"
-
 _last_click_t = 0.0
 
 def handle_tap(_payload: dict):
@@ -190,25 +311,32 @@ def handle_tap(_payload: dict):
 def apply_plan(plan: dict, slots: dict):
     t = plan.get("type")
 
+    # Open arbitrary macOS application by name or bundle id
+    if t in {"applescript_open_app", "open_app"}:
+        app_raw = (slots.get("app") or "").strip()
+        if not app_raw:
+            return "open_app_missing"
+        # Resolve alias → canonical name/bundle id
+        app_name = slot_app(app_raw) or app_raw
+        rc = open_mac_app(app_name)
+        return "opened_app" if rc == 0 else "open_app_failed"
+
     if t == "applescript_gmail_compose":
         open_gmail_compose(); return "opened_gmail"
 
     if t == "applescript_open_url":
         raw = slots.get("url", "")
+        # Heuristic: if user said an app name (e.g., "safari", "keynote"), open the app instead of searching
+        app_guess = slot_app(raw)
+        if app_guess and raw and "." not in raw and "://" not in raw:
+            rc = open_mac_app(app_guess)
+            return "opened_app" if rc == 0 else "open_app_failed"
+
         url = slot_site(raw)  # alias → URL or normalized token
-        # final sanity: valid URL? else fallback to a Google search
         parsed = urlparse(url)
         if not (parsed.scheme and parsed.netloc):
             url = f"https://www.google.com/search?q={quote(raw.strip())}"
-        script = f'''
-        tell application "Google Chrome"
-            activate
-            if (count of windows) = 0 then make new window
-            set newTab to make new tab at end of tabs of front window
-            set URL of newTab to "{url}"
-        end tell
-        '''
-        run_applescript(script); return "opened_url"
+        return open_url_in_active_browser(url)
 
     if t == "applescript_keynote_start":
         start_keynote_slideshow(); return "opened_presentation"
@@ -236,22 +364,42 @@ def apply_plan(plan: dict, slots: dict):
         to = (slots.get("to") or "").strip()
         subject = (slots.get("subject") or "").strip()
         body = (slots.get("body") or "").strip()
-        if not to:
-            open_gmail_compose(); return "opened_gmail"
-        url = mailto_url(to, subject, body)
-        script = f'''
-        tell application "Google Chrome"
-            activate
-            if (count of windows) = 0 then make new window
-            set newTab to make new tab at end of tabs of front window
-            set URL of newTab to "{url}"
-        end tell
-        '''
-        run_applescript(script); time.sleep(1.0); return "mailto_composed"
+        # Prefer Gmail web compose with fields if we have at least one field
+        if to or subject or body:
+            return gmail_compose_in_active_browser(to, subject, body, send=False)
+        # Otherwise, open Gmail compose window
+        open_gmail_compose()
+        return "opened_gmail"
 
     return "noop"
 
 def execute_intent(intent: str, slots: dict):
+    # Handle server-level intents not present in keymap
+    if intent == "set_browser":
+        browser = (slots.get("browser") or "").strip()
+        set_preferred_browser(browser)
+        return "browser_set"
+
+    if intent == "compose_email":
+        return gmail_compose_in_active_browser(
+            slots.get("to", ""),
+            slots.get("subject", ""),
+            slots.get("body", ""),
+            send=False
+        )
+
+    if intent == "send_email":
+        # one-shot send if fields provided; else send current compose
+        to = slots.get("to"); subject = slots.get("subject"); body = slots.get("body")
+        if any([to, subject, body]):
+            return gmail_compose_in_active_browser(to or "", subject or "", body or "", send=True)
+        try:
+            pyautogui.hotkey("command", "enter")
+            return "gmail_sent"
+        except Exception as e:
+            print("gmail send hotkey error:", e)
+            return "gmail_send_failed"
+
     global LAST_EXECUTED
     plan = KEYMAP.get(intent)
     if not plan: return "unknown_intent"
@@ -315,8 +463,6 @@ async def ws_handler(websocket):
                 kind = data.get("kind")
                 if kind == "tilt_vector":
                     res = handle_tilt_vector(data)
-                elif kind == "tilt_angles":
-                    res = handle_tilt_angles(data)
                 elif kind == "tap":
                     res = handle_tap(data)
                 elif kind == "swipe":
