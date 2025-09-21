@@ -9,18 +9,32 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject var streamer = MotionSpeechStreamer()
+    @State private var gesturesOn: Bool = false
 
     var body: some View {
         VStack(spacing: 16) {
             Text("Hands-Free Office").font(.title2).bold()
             Text(streamer.connectionStatus).font(.footnote)
-
+                        
             Button(streamer.isListening ? "Stop listening" : "Start listening") {
                 streamer.isListening ? streamer.stopListening() : streamer.startListening()
             }.buttonStyle(.borderedProminent)
 
             Button(streamer.isMotionActive ? "Stop motion" : "Start motion") {
                 streamer.isMotionActive ? streamer.stopMotion() : streamer.startMotion()
+            }
+            .buttonStyle(.bordered)
+            
+            Button {
+                let enable = !streamer.isGesturesOn
+                streamer.sendJSON([
+                    "type": "gesture",
+                    "kind": "gestures_toggle",
+                    "enabled": enable
+                ])
+                streamer.isGesturesOn = enable
+            } label: {
+                Text(streamer.isGesturesOn ? "Stop hand gestures" : "Start hand gestures")
             }
             .buttonStyle(.bordered)
 

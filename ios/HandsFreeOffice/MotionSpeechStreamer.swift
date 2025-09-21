@@ -19,6 +19,8 @@ final class MotionSpeechStreamer: NSObject, ObservableObject {
     @Published var connectionStatus: String = "disconnected"
     @Published var isListening: Bool = false
     @Published var isMotionActive: Bool = false
+    @Published var isGesturesOn: Bool = false
+
 
     // MARK: - Networking
     private var webSocket: URLSessionWebSocketTask?
@@ -129,7 +131,7 @@ final class MotionSpeechStreamer: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.connect() }
     }
 
-    private func sendJSON(_ dict: [String: Any]) {
+    func sendJSON(_ dict: [String: Any]) {
         guard let ws = webSocket else { return }
         do {
             let data = try JSONSerialization.data(withJSONObject: dict, options: [])

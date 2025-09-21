@@ -2,6 +2,7 @@
 import json, asyncio, sys
 from pathlib import Path
 import websockets
+from gestures import CameraGestureEngine
 
 from urllib.parse import urlparse, quote, urlencode
 
@@ -14,6 +15,7 @@ from nlu import (
     local_route, ollama_route, validate_and_normalize_plan
 )
 import time
+import subprocess, shlex
 import datetime
 
 def now(): return datetime.datetime.now().strftime("%H:%M:%S")
@@ -49,6 +51,61 @@ def set_preferred_browser(name: str):
 # ===== Gesture → Action tuning =====
 import pyautogui
 pyautogui.FAILSAFE = False
+
+# --- cross-browser navigation and zoom helpers ---
+def browser_history_back():
+    try:
+        pyautogui.hotkey("command", "[")
+    except Exception as e:
+        print("history_back error:", e)
+
+def browser_history_forward():
+    try:
+        pyautogui.hotkey("command", "]")
+    except Exception as e:
+        print("history_forward error:", e)
+
+def browser_next_tab():
+    try:
+        pyautogui.hotkey("ctrl", "tab")
+    except Exception as e:
+        print("next_tab error:", e)
+
+def browser_prev_tab():
+    try:
+        pyautogui.hotkey("ctrl", "shift", "tab")
+    except Exception as e:
+        print("prev_tab error:", e)
+
+def browser_zoom_in():
+    try:
+        pyautogui.hotkey("command", "=")
+    except Exception as e:
+        print("zoom_in error:", e)
+
+def browser_zoom_out():
+    try:
+        pyautogui.hotkey("command", "-")
+    except Exception as e:
+        print("zoom_out error:", e)
+
+def browser_zoom_reset():
+    try:
+        pyautogui.hotkey("command", "0")
+    except Exception as e:
+        print("zoom_reset error:", e)
+
+def scroll_up(amount=240):
+    try:
+        pyautogui.scroll(abs(int(amount)))
+    except Exception as e:
+        print("scroll_up error:", e)
+
+def scroll_down(amount=240):
+    try:
+        pyautogui.scroll(-abs(int(amount)))
+    except Exception as e:
+        print("scroll_down error:", e)
 
 MOUSE_MODE = "cursor"           # cursor (not scroll)
 # Extra smoothing/tuning (feel free to tweak live)
@@ -129,7 +186,6 @@ def open_url_in_browser(url: str, browser: str) -> str:
         if rc == 0:
             return f"opened_url_{browser.lower().replace(' ', '_')}"
     # If we get here, try a generic open -a
-    import subprocess, shlex
     try:
         subprocess.check_call(f"open -a {shlex.quote(browser)} {shlex.quote(url)}", shell=True)
         return f"opened_url_{browser.lower().replace(' ', '_')}_fallback"
@@ -157,7 +213,6 @@ def open_url_in_active_browser(url: str) -> str:
     if front == "Safari" or front in CHROME_FAMILY:
         return open_url_in_browser(url, front)
     # fall back to default if no browser is frontmost
-    import subprocess, shlex
     try:
         subprocess.check_call(f"open {shlex.quote(url)}", shell=True)
         return "opened_url_default"
@@ -204,7 +259,6 @@ def open_mac_app(app_raw: str) -> int:
     if str(rc).strip() == "0":
         return 0
     # Fallback: open -a "App"
-    import subprocess, shlex
     try:
         subprocess.check_call(f"open -a {shlex.quote(app)}", shell=True)
         return 0
@@ -348,6 +402,56 @@ class MouseController:
             print("click error:", e)
 
 MOUSE = MouseController()
+
+# --- Camera gesture engine wiring ---
+GEST_ENGINE = None
+
+def ensure_gesture_engine():
+    """
+    Lazy-initialize a singleton CameraGestureEngine and return it.
+    The engine invokes on_action(action: str) which we map to hotkeys.
+    """
+    global GEST_ENGINE
+    if GEST_ENGINE is None:
+        def on_action(a: str):
+            try:
+                if a == "zoom_in":
+                    browser_zoom_in()
+                    
+                elif a == "zoom_out":
+                    browser_zoom_out()     
+                    
+                elif a == "history_back":
+                    browser_history_back()
+                elif a == "history_forward":
+                    browser_history_forward()
+                elif a == "next_tab":
+                    browser_next_tab()
+                elif a == "prev_tab":
+                    browser_prev_tab()
+                elif a == "scroll_up":
+                    pyautogui.scroll(5)
+                elif a == "scroll_down":
+                    pyautogui.scroll(-5)
+                elif a == "app_switcher_start":
+                    # Hold ⌘ and press Tab to reveal the switcher
+                    pyautogui.keyDown("command")
+                    pyautogui.press("tab")
+                elif a == "app_switcher_next":
+                    pyautogui.press("tab")
+                elif a == "app_switcher_prev":
+                    pyautogui.hotkey("shift", "tab")
+                elif a == "app_switcher_commit":
+                    # Release ⌘ to commit the selected app
+                    pyautogui.keyUp("command")
+            except Exception as e:
+                print("gesture action error:", a, e)
+        try:
+            GEST_ENGINE = CameraGestureEngine(on_action)
+        except Exception as e:
+            print("failed to init CameraGestureEngine:", e)
+            GEST_ENGINE = None
+    return GEST_ENGINE
 
 # --- gesture handlers --------------------------------------------------------
 
@@ -563,8 +667,42 @@ async def ws_handler(websocket):
                 elif kind == "tap":
                     res = handle_tap(data)
                 elif kind == "swipe":
-                    # swipe handler removed per instructions, so fallback
-                    res = "gesture_ignored"
+                    # Swipe mapping (from phone or camera):
+                    # right → history forward
+                    # left  → history back
+                    # up    → scroll up
+                    # down  → scroll down
+                    direction = (data.get("direction") or "").lower()
+                    if not direction:
+                        try:
+                            dx = float(data.get("dx", 0.0))
+                            dy = float(data.get("dy", 0.0))
+                            if abs(dx) >= abs(dy):
+                                direction = "right" if dx > 0 else "left"
+                            else:
+                                direction = "down" if dy > 0 else "up"
+                        except Exception:
+                            direction = ""
+                    if direction == "right":
+                        browser_history_forward(); res = "history_forward"
+                    elif direction == "left":
+                        browser_history_back(); res = "history_back"
+                    elif direction == "up":
+                        scroll_up(); res = "scroll_up"
+                    elif direction == "down":
+                        scroll_down(); res = "scroll_down"
+                    else:
+                        res = "gesture_ignored"
+                elif kind == "gestures_toggle":
+                    enabled = bool(data.get("enabled"))
+                    eng = ensure_gesture_engine()
+                    if not eng:
+                        res = "gestures_unavailable"
+                    else:
+                        if enabled:
+                            eng.start(); res = "gestures_on"
+                        else:
+                            eng.stop(); res = "gestures_off"
                 elif kind == "motion_started":
                     res = "motion_started"
                 else:
