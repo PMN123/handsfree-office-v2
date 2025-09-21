@@ -1,8 +1,8 @@
-# env files
+# ---- env files
 .env
 *.env
 
-# python venvs
+# ---- Python virtualenvs
 venv/
 .venv/
 **/venv/
@@ -10,10 +10,24 @@ venv/
 server/.venv/
 server/.venv311/
 
-# python caches
+# ---- Python caches / build
 __pycache__/
 *.py[cod]
 *.egg-info/
+.dist/
+build/
+*.log
 
-# macOS
+# ---- Mac / IDE
 .DS_Store
+.idea/
+.vscode/
+
+# ---- Site-packages (never commit)
+**/site-packages/
+**/dist-packages/
+
+# ---- Big native blobs (safety)
+*.so
+*.dylib
+*.a
