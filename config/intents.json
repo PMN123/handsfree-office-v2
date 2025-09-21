@@ -1,0 +1,130 @@
+{
+  "meta": { "notes": "Patterns first, then keyword contains, then TF-IDF, then LLM." },
+
+  "type_text": {
+    "patterns": ["(?i)^(type|write|dictate)\\s+(?P<text>.+)$"],
+    "examples": ["type hello team", "write this down"]
+  },
+
+  "open_gmail": { "examples": ["open gmail", "go to gmail", "open my email"] },
+
+  "set_browser": {
+    "patterns": [
+      "(?i)^(?:set|use|prefer)\\s+(?P<browser>safari|chrome)\\s+(?:as\\s+)?(?:my\\s+)?browser$",
+      "(?i)^switch\\s+browser\\s+to\\s+(?P<browser>safari|chrome)$",
+      "(?i)^switch\\s+to\\s+(?P<browser>safari|chrome)$"
+    ],
+    "examples": [
+      "use safari as my browser",
+      "set browser chrome",
+      "switch to safari"
+    ],
+    "slots": { "browser": "(safari|chrome)" }
+  },
+
+  "compose_email": {
+    "patterns": [
+      "(?i)^compose\\s+(?:an\\s+)?email\\s+to\\s+(?P<to>[^\\s]+)\\s+subject\\s+(?P<subject>.+?)\\s+body\\s+(?P<body>.+)$",
+      "(?i)^email\\s+(?P<to>[^\\s]+)\\s+subject\\s+(?P<subject>.+?)\\s+body\\s+(?P<body>.+)$"
+    ],
+    "examples": [
+      "compose email to alice@example.com subject project update body pushing the deck tonight",
+      "email bob@foo.io subject check in body did you see my note"
+    ],
+    "slots": {
+      "to": "([^\\s]+)",
+      "subject": "(.+)",
+      "body": "(.+)"
+    }
+  },
+
+  "send_email": {
+    "patterns": [
+      "(?i)^send\\s+email$",
+      "(?i)^send$",
+      "(?i)^send\\s+email\\s+to\\s+(?P<to>[^\\s]+)\\s+subject\\s+(?P<subject>.+?)\\s+body\\s+(?P<body>.+)$"
+    ],
+    "examples": [
+      "send email",
+      "send",
+      "send email to team@acme.com subject standup body blocker on api rollout"
+    ],
+    "slots": {
+      "to": "([^\\s]+)",
+      "subject": "(.+)",
+      "body": "(.+)"
+    }
+  },
+
+  "open_url": {
+    "patterns": ["(?i)^(open|go to|navigate to)\\s+(?P<url>[^\\s]+)$"],
+    "examples": ["open twitter.com", "go to github", "navigate to notion"]
+  },
+
+  "open_app": {
+    "patterns": ["(?i)^(open|launch|start)\\s+(?P<app>.+)$"],
+    "examples": ["open chrome", "launch safari", "start keynote"]
+  },
+
+  "new_tab": { "examples": ["new tab", "open a new tab"] },
+  "close_tab": { "examples": ["close tab"] },
+  "next_tab": { "examples": ["next tab"] },
+  "previous_tab": { "examples": ["previous tab"] },
+  "reload_tab": { "examples": ["reload", "refresh"] },
+
+  "scroll_down": { "examples": ["scroll down", "down a bit", "page down", "next"] },
+  "scroll_up": { "examples": ["scroll up", "up a bit", "page up"] },
+  "scroll_top": { "examples": ["scroll to top", "go to top"] },
+  "scroll_bottom": { "examples": ["scroll to bottom", "go to bottom"] },
+
+  "tab_key": { "examples": ["tab", "next field"] },
+  "shift_tab_key": { "examples": ["shift tab", "previous field"] },
+  "enter_key": { "examples": ["press enter", "hit return"] },
+  "escape_key": { "examples": ["press escape", "cancel"] },
+
+  "backspace": { "examples": ["backspace", "delete previous"] },
+  "delete_forward": { "examples": ["delete", "delete forward"] },
+
+
+  "select_all": { "examples": ["select all"] },
+  "copy": { "examples": ["copy"] },
+  "paste": { "examples": ["paste"] },
+  "cut": { "examples": ["cut"] },
+  "undo": { "examples": ["undo"] },
+  "redo": { "examples": ["redo"] },
+
+  "bold": { "examples": ["bold", "make it bold"] },
+  "italic": { "examples": ["italic"] },
+  "underline": { "examples": ["underline"] },
+
+  "find": { "examples": ["find", "search on page"] },
+  "find_next": { "examples": ["find next"] },
+  "find_previous": { "examples": ["find previous"] },
+
+  "arrow_left": { "examples": ["left"] },
+  "arrow_right": { "examples": ["right"] },
+  "arrow_up": { "examples": ["up"] },
+  "arrow_down": { "examples": ["down"] },
+
+  "word_left": { "examples": ["word left"] },
+  "word_right": { "examples": ["word right"] },
+  "line_start": { "examples": ["line start", "home"] },
+  "line_end": { "examples": ["line end", "end"] },
+
+  "zoom_in": { "examples": ["zoom in"] },
+  "zoom_out": { "examples": ["zoom out"] },
+  "zoom_reset": { "examples": ["reset zoom"] },
+
+  "start_presentation": { "examples": ["open presentation", "start presentation", "begin slideshow", "play slides"] },
+  "exit_presentation": { "examples": ["exit presentation", "stop slideshow"] },
+  "next_slide": { "examples": ["next slide", "advance slide", "go forward"] },
+  "previous_slide": { "examples": ["previous slide", "go back slide"] },
+  "first_slide": { "examples": ["first slide"] },
+  "last_slide": { "examples": ["last slide"] },
+
+  "new_window": { "examples": ["new window"] },
+  "close_window": { "examples": ["close window"] },
+  "minimize_window": { "examples": ["minimize window"] },
+  "switch_app": { "examples": ["switch app", "app switcher"] },
+  "repeat_last": { "examples": ["repeat last", "do that again"] }
+}
