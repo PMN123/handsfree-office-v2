@@ -1,0 +1,19 @@
+# env files
+.env
+*.env
+
+# python venvs
+venv/
+.venv/
+**/venv/
+**/.venv/
+server/.venv/
+server/.venv311/
+
+# python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
