@@ -20,6 +20,7 @@
 
   "tab_key":               { "type": "key", "key": "tab" },
   "shift_tab_key":         { "type": "hotkey", "keys": ["shift", "tab"] },
+  "tab_next_field": { "type": "key", "key": "tab" },
   "enter_key":             { "type": "key", "key": "enter" },
   "escape_key":            { "type": "key", "key": "esc" },
 

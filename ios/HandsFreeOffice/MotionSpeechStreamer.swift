@@ -31,7 +31,7 @@ final class MotionSpeechStreamer: NSObject, ObservableObject {
     }()
 
     /// ⬇️ Set this to your Mac’s IP (same network as phone)
-    private let serverURL = URL(string: "ws://100.69.87.156:8765")!
+    private let serverURL = URL(string: "ws://192.168.217.25:8765")!
 
     private var pingTimer: Timer?
     private var reconnectBackoff: TimeInterval = 0.5

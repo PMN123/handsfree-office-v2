@@ -6,6 +6,14 @@
     "examples": ["type hello team", "write this down"]
   },
 
+  "tab_next_field": {
+  "patterns": [
+    "(?i)^subject$",
+    "(?i)^body$"
+  ],
+  "examples": ["subject", "body", "next field"]
+},
+
   "open_gmail": { "examples": ["open gmail", "go to gmail", "open my email"] },
 
   "set_browser": {
