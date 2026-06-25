@@ -1,3 +1,4 @@
+import sys
 import time
 import math
 import threading
@@ -123,8 +124,12 @@ class CameraGestureEngine:
         if cv2 is None or mp is None:
             # cannot run - missing deps
             return
-        # cap = cv2.VideoCapture(self.camera_index)
-        cap = cv2.VideoCapture(0)
+        # On Windows the default MSMF backend has high init latency; DirectShow
+        # (CAP_DSHOW) starts a single webcam faster (PRD §8.4).
+        if sys.platform == "win32":
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FPS, 60)
         hands = mp.solutions.hands.Hands(model_complexity=0, max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5)
         try:

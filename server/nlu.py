@@ -2,10 +2,12 @@
 import string
 import os, re, json, httpx
 from pathlib import Path
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import Optional
+
+import executor
 
 BASE = Path(__file__).parent.parent
 CONFIG = BASE / "config"
@@ -22,7 +24,14 @@ ALLOWED_ACTIONS = set(KEYMAP.keys()) | {"set_browser", "compose_email"}
 
 def slot_app(name: str) -> str:
     n = (name or "").lower().strip()
-    return SLOTS.get("apps", {}).get(n, name)
+    entry = SLOTS.get("apps", {}).get(n)
+    if entry is None:
+        return name
+    if isinstance(entry, dict):
+        # Per-platform app name (PRD §8.3): platform key → "default" → raw name.
+        plat = executor.detect_platform()
+        return entry.get(plat) or entry.get("default") or name
+    return entry  # flat string (identical across platforms)
 
 def slot_site(token: str) -> str:
     t = (token or "").lower().strip()
@@ -65,14 +74,34 @@ def _extract_first_json_obj(text: str):
 def actions_list_for_prompt():
     return "\n".join([f"- {name}" for name in sorted(ALLOWED_ACTIONS)])
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")  # D3
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, max=3))
-def ollama_route(text: str):
-    prompt = SYSTEM_PROMPT_TMPL.replace("{{ACTIONS_LIST}}", actions_list_for_prompt())
-    prompt = f"{prompt}\nUser: {text.strip()}\nOutput:"
-    with httpx.Client(timeout=45) as client:
+
+class OllamaUnavailable(Exception):
+    """Local Ollama is unreachable / model missing. The command handler catches
+    this and returns nlu_failed:llm_unavailable instead of crashing or stalling
+    (PRD §8.6)."""
+
+
+def probe_ollama(timeout: float = 1.0) -> bool:
+    """Quick reachability check, used for the one-time startup warning."""
+    base = OLLAMA_URL.rsplit("/api/", 1)[0]
+    try:
+        with httpx.Client(timeout=timeout) as c:
+            return c.get(base + "/api/tags").status_code == 200
+    except Exception:
+        return False
+
+
+# Only RETRY transient timeouts. A refused connection (Ollama down) or HTTP
+# error (model missing) fails fast — no 3x backoff stall per command (§8.6).
+@retry(stop=stop_after_attempt(2),
+       wait=wait_exponential(multiplier=0.3, max=1.0),
+       retry=retry_if_exception_type(httpx.TimeoutException),
+       reraise=True)
+def _ollama_generate(prompt: str) -> dict:
+    with httpx.Client(timeout=20) as client:
         r = client.post(OLLAMA_URL, json={
             "model": OLLAMA_MODEL,
             "prompt": prompt,
@@ -80,11 +109,24 @@ def ollama_route(text: str):
             "options": {"temperature": 0}
         })
     r.raise_for_status()
-    data = r.json()
+    return r.json()
+
+
+def ollama_route(text: str):
+    prompt = SYSTEM_PROMPT_TMPL.replace("{{ACTIONS_LIST}}", actions_list_for_prompt())
+    prompt = f"{prompt}\nUser: {text.strip()}\nOutput:"
+    try:
+        data = _ollama_generate(prompt)
+    except httpx.ConnectError as e:
+        raise OllamaUnavailable("connect_refused") from e
+    except httpx.TimeoutException as e:
+        raise OllamaUnavailable("timeout") from e
+    except httpx.HTTPStatusError as e:
+        raise OllamaUnavailable(f"http_{e.response.status_code}") from e
     raw = (data.get("response") or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
-        raw = re.sub(r"^json\\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"^json\s*", "", raw, flags=re.IGNORECASE)
     return _extract_first_json_obj(raw)
 
 def validate_and_normalize_plan(plan: dict):

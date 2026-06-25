@@ -6,6 +6,9 @@ import pyperclip
 from urllib.parse import quote
 from typing import Optional
 
+import executor
+from platform_keys import primary_modifier
+
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
 
@@ -13,7 +16,11 @@ def run_applescript(script: str) -> Optional[str]:
     """
     Execute the given AppleScript and return stdout as a string (stripped).
     Returns None on failure. Errors are printed for debugging but do not raise.
+
+    No-ops (returns None) off macOS — AppleScript / osascript exist only there.
     """
+    if executor.detect_platform() != "darwin":
+        return None
     try:
         proc = subprocess.run(
             ["osascript", "-e", script],
@@ -34,10 +41,13 @@ def focused_typing(text: str):
     if not text:
         return
     pyperclip.copy(text)
-    pyautogui.hotkey("command", "v")
+    # Paste via the platform's primary modifier (Cmd on macOS, Ctrl elsewhere).
+    pyautogui.hotkey(primary_modifier(), "v")
 
 def open_gmail_compose():
-    # NOTE: superseded by server.gmail_compose which respects the active browser
+    # SUPERSEDED by executor.SystemExecutor.compose_email() (cross-platform,
+    # Gmail-web compose). Kept for reference; macOS-only (run_applescript
+    # no-ops off macOS).
     script = """
     tell application "Google Chrome"
         activate
@@ -52,6 +62,8 @@ def open_gmail_compose():
     except: pass
 
 def start_keynote_slideshow():
+    # SUPERSEDED by executor.SystemExecutor.start_presentation() (D2: Google
+    # Slides as the cross-platform path). Kept for reference; macOS-only.
     script = """
     tell application "Keynote"
         activate

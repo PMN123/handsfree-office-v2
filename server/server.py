@@ -1,99 +1,80 @@
 # server/server.py
-import json, asyncio, sys
+import json, asyncio, sys, os
 from pathlib import Path
 import websockets
 from gestures import CameraGestureEngine
 
-from urllib.parse import urlparse, quote, urlencode
+from urllib.parse import urlparse, quote
 
-from primitives import (
-    run_applescript, focused_typing, open_gmail_compose,
-    start_keynote_slideshow, mailto_url
-)
+from executor import create_executor, detect_platform, is_wsl
+from platform_keys import remap_intent_keys, app_switch_modifier, primary_modifier
+from primitives import focused_typing, mailto_url
 from nlu import (
     KEYMAP, SLOTS, slot_app, slot_site,
-    local_route, ollama_route, validate_and_normalize_plan
+    local_route, ollama_route, validate_and_normalize_plan,
+    OllamaUnavailable, probe_ollama, OLLAMA_URL,
 )
 import time
-import subprocess, shlex
 import datetime
+
+# Single platform executor for all OS-specific operations (PRD §8.1).
+EXEC = create_executor()
 
 def now(): return datetime.datetime.now().strftime("%H:%M:%S")
 
 REPEAT_BLOCKLIST = {"type_text", "mailto_compose"}  # intents we won't auto-repeat
 LAST_EXECUTED = None  # ensure repeat works even before any action runs
 
-# ===== Browser preference state (active browser selection) =====
-PREFERRED_BROWSER = None  # "Safari" or any app in CHROME_FAMILY
-
-CHROME_FAMILY = {
-    "Google Chrome",
-    "Brave Browser",
-    "Microsoft Edge",
-    "Vivaldi",
-}
+# ===== Browser preference (DEMOTED — D1) =====
+# Browser hotkeys now act on the frontmost browser (else open the default
+# browser) — a uniform, OS-neutral rule (PRD §8.1, L-5). The old "preferred
+# browser" / AppleScript active-tab routing is superseded. set_browser is kept
+# as a near-no-op so the existing intent doesn't error.
+LAST_REQUESTED_BROWSER = None
 
 def set_preferred_browser(name: str):
-    """Set the active browser preference. Accepts Safari or any of CHROME_FAMILY names."""
-    global PREFERRED_BROWSER
-    if not name:
-        return
-    n = str(name).strip()
-    if n.lower() in {"safari", "apple safari"}:
-        PREFERRED_BROWSER = "Safari"
-    elif n in CHROME_FAMILY or n.lower() in {"google chrome", "chrome", "brave browser", "microsoft edge", "vivaldi", "brave", "edge"}:
-        # normalize common lowercase to canonical names
-        if n.lower() == "chrome": n = "Google Chrome"
-        elif n.lower() == "brave": n = "Brave Browser"
-        elif n.lower() == "edge": n = "Microsoft Edge"
-        PREFERRED_BROWSER = n
+    global LAST_REQUESTED_BROWSER
+    if name:
+        LAST_REQUESTED_BROWSER = str(name).strip()
 
 # ===== Gesture → Action tuning =====
 import pyautogui
 pyautogui.FAILSAFE = False
 
-# --- cross-browser navigation and zoom helpers ---
-def browser_history_back():
+# --- cross-browser navigation and zoom helpers (D1 frontmost-driven rule) ---
+def _browser_hotkey(mac_keys, other_keys):
+    """D1: send the hotkey to the frontmost browser; if no browser is focused,
+    open the default browser instead (PRD §8.1)."""
+    keys = mac_keys if detect_platform() == "darwin" else other_keys
     try:
-        pyautogui.hotkey("command", "[")
+        if EXEC.frontmost_is_browser():
+            pyautogui.hotkey(*keys)
+        else:
+            EXEC.open_default_browser()
     except Exception as e:
-        print("history_back error:", e)
+        print("browser hotkey error:", e)
+
+def browser_history_back():
+    # Cmd+[ on macOS; Alt+Left elsewhere (Ctrl+[ is a no-op in Chrome — §8.2).
+    _browser_hotkey(["command", "["], ["alt", "left"])
 
 def browser_history_forward():
-    try:
-        pyautogui.hotkey("command", "]")
-    except Exception as e:
-        print("history_forward error:", e)
+    _browser_hotkey(["command", "]"], ["alt", "right"])
 
 def browser_next_tab():
-    try:
-        pyautogui.hotkey("ctrl", "tab")
-    except Exception as e:
-        print("next_tab error:", e)
+    _browser_hotkey(["ctrl", "tab"], ["ctrl", "tab"])
 
 def browser_prev_tab():
-    try:
-        pyautogui.hotkey("ctrl", "shift", "tab")
-    except Exception as e:
-        print("prev_tab error:", e)
+    _browser_hotkey(["ctrl", "shift", "tab"], ["ctrl", "shift", "tab"])
 
 def browser_zoom_in():
-    try:
-        pyautogui.hotkey("command", "=")
-    except Exception as e:
-        print("zoom_in error:", e)
+    _browser_hotkey(["command", "="], ["ctrl", "="])
 
 def browser_zoom_out():
-    try:
-        pyautogui.hotkey("command", "-")
-    except Exception as e:
-        print("zoom_out error:", e)
+    _browser_hotkey(["command", "-"], ["ctrl", "-"])
 
 def browser_zoom_reset():
-    try:
-        pyautogui.hotkey("command", "0")
-    except Exception as e:
-        print("zoom_reset error:", e)
+    _browser_hotkey(["command", "0"], ["ctrl", "0"])
 
 def scroll_up(amount=240):
     try:
@@ -121,175 +102,11 @@ ALPHA_ANGLE = 0.2      # low-pass on angles
 MAX_STEP_PX = 16.0     # clamp per-tick pixel move
 UPDATE_HZ = 30.0       # target update frequency (informational)
 
-# --- Frontmost app + browser/tab helpers ---------------------------------------------------------
-
-def get_frontmost_app_name() -> str:
-    """Return the name of the frontmost macOS app, or empty string on failure."""
-    script = '''
-    tell application "System Events"
-        set frontApp to name of first application process whose frontmost is true
-    end tell
-    return frontApp
-    '''
-    try:
-        name = run_applescript(script)
-        return str(name).strip()
-    except Exception as e:
-        print("frontmost app error:", e)
-        return ""
-
-
-def applescript_open_url_in_chrome_family(app_name: str, url: str) -> int:
-    """Open a URL in a Chromium-based browser via AppleScript tab API."""
-    script = f'''
-    try
-        tell application "{app_name}"
-            activate
-            if (count of windows) = 0 then make new window
-            set newTab to make new tab at end of tabs of front window
-            set URL of newTab to "{url}"
-        end tell
-        return 0
-    on error errText number errNum
-        return errNum
-    end try
-    '''
-    return int(run_applescript(script))
-
-
-def applescript_open_url_in_safari(url: str) -> int:
-    script = f'''
-    try
-        tell application "Safari"
-            activate
-            if (count of windows) = 0 then make new document
-            tell window 1
-                set current tab to (make new tab with properties {{URL:"{url}"}})
-            end tell
-        end tell
-        return 0
-    on error errText number errNum
-        return errNum
-    end try
-    '''
-    return int(run_applescript(script))
-
-
-def open_url_in_browser(url: str, browser: str) -> str:
-    """Open URL in the specific browser name provided."""
-    if browser == "Safari":
-        rc = applescript_open_url_in_safari(url)
-        if rc == 0:
-            return "opened_url_safari"
-    elif browser in CHROME_FAMILY:
-        rc = applescript_open_url_in_chrome_family(browser, url)
-        if rc == 0:
-            return f"opened_url_{browser.lower().replace(' ', '_')}"
-    # If we get here, try a generic open -a
-    try:
-        subprocess.check_call(f"open -a {shlex.quote(browser)} {shlex.quote(url)}", shell=True)
-        return f"opened_url_{browser.lower().replace(' ', '_')}_fallback"
-    except Exception as e:
-        print("open -a fallback error:", e)
-        # Final fallback: default handler
-        try:
-            subprocess.check_call(f"open {shlex.quote(url)}", shell=True)
-            return "opened_url_default_fallback"
-        except Exception as e2:
-            print("open default fallback error:", e2)
-            return "open_url_failed"
-
-
-def open_url_in_active_browser(url: str) -> str:
-    """
-    Open URL in the active browser:
-    - use PREFERRED_BROWSER if set
-    - else use frontmost app if it is a browser
-    - else use system default
-    """
-    if PREFERRED_BROWSER:
-        return open_url_in_browser(url, PREFERRED_BROWSER)
-    front = get_frontmost_app_name()
-    if front == "Safari" or front in CHROME_FAMILY:
-        return open_url_in_browser(url, front)
-    # fall back to default if no browser is frontmost
-    try:
-        subprocess.check_call(f"open {shlex.quote(url)}", shell=True)
-        return "opened_url_default"
-    except Exception as e:
-        print("open default error:", e)
-        return "open_url_failed"
-
-
-def open_url_in_frontmost_browser(url: str) -> str:
-    # Backwards-compat shim - now respects preferred browser if set
-    return open_url_in_active_browser(url)
-
-
-def open_mac_app(app_raw: str) -> int:
-    """Open arbitrary macOS app by name or bundle id; return 0 on success, nonzero on failure."""
-    app = app_raw.strip()
-    if not app:
-        return 1
-    if "." in app:  # looks like bundle id, e.g., "zoom.us"
-        script = f'''
-        try
-            tell application id "{app}"
-                if it is not running then launch
-                activate
-            end tell
-            return 0
-        on error errText number errNum
-            return errNum
-        end try
-        '''
-    else:
-        script = f'''
-        try
-            tell application "{app}"
-                if it is not running then launch
-                activate
-            end tell
-            return 0
-        on error errText number errNum
-            return errNum
-        end try
-        '''
-    rc = run_applescript(script)
-    if str(rc).strip() == "0":
-        return 0
-    # Fallback: open -a "App"
-    try:
-        subprocess.check_call(f"open -a {shlex.quote(app)}", shell=True)
-        return 0
-    except Exception as e:
-        print("open_app error:", e)
-        return 1
-
-
-def _gmail_compose_url(to: str = "", subject: str = "", body: str = "") -> str:
-    params = {
-        "view": "cm",
-        "fs": "1",
-        "to": to or "",
-        "su": subject or "",
-        "body": body or "",
-    }
-    return "https://mail.google.com/mail/?" + urlencode(params, doseq=False, safe=":/?&=")
-
-
-def gmail_compose_in_active_browser(to: str, subject: str, body: str, send: bool = False) -> str:
-    url = _gmail_compose_url(to, subject, body)
-    res = open_url_in_active_browser(url)
-    # small delay so the compose UI is ready
-    time.sleep(0.8)
-    if send:
-        try:
-            pyautogui.hotkey("command", "enter")
-        except Exception as e:
-            print("gmail send hotkey error:", e)
-            return "gmail_send_failed"
-    return "gmail_compose_opened" if res.startswith("opened_url") else "gmail_compose_failed"
+# --- Frontmost app / URL open / app launch / Gmail compose are all handled by
+# EXEC (executor.py). The old macOS-only AppleScript browser helpers
+# (get_frontmost_app_name, open_url_in_active_browser, open_mac_app,
+# gmail_compose_in_active_browser, ...) are superseded by the platform executor
+# and the D1 frontmost-driven rule (PRD §8.1, §8.3).
 
 # ----------------- Mouse Controller -----------------
 
@@ -434,16 +251,17 @@ def ensure_gesture_engine():
                 elif a == "scroll_down":
                     pyautogui.scroll(-5)
                 elif a == "app_switcher_start":
-                    # Hold ⌘ and press Tab to reveal the switcher
-                    pyautogui.keyDown("command")
+                    # Hold the switch modifier (Cmd on macOS, Alt elsewhere)
+                    # and press Tab to reveal the switcher (§8.2).
+                    pyautogui.keyDown(app_switch_modifier())
                     pyautogui.press("tab")
                 elif a == "app_switcher_next":
                     pyautogui.press("tab")
                 elif a == "app_switcher_prev":
                     pyautogui.hotkey("shift", "tab")
                 elif a == "app_switcher_commit":
-                    # Release ⌘ to commit the selected app
-                    pyautogui.keyUp("command")
+                    # Release the switch modifier to commit the selected app
+                    pyautogui.keyUp(app_switch_modifier())
             except Exception as e:
                 print("gesture action error:", a, e)
         try:
@@ -498,35 +316,36 @@ def handle_tap(_payload: dict):
 def apply_plan(plan: dict, slots: dict):
     t = plan.get("type")
 
-    # Open arbitrary macOS application by name or bundle id (from A)
+    # Open an application by name or bundle id (cross-platform via EXEC).
     if t in {"applescript_open_app", "open_app"}:
         app_raw = (slots.get("app") or "").strip()
         if not app_raw:
             return "open_app_missing"
-        # Resolve alias → canonical name/bundle id
+        # Resolve alias → platform-specific name/bundle id
         app_name = slot_app(app_raw) or app_raw
-        rc = open_mac_app(app_name)
+        rc = EXEC.open_app(app_name)
         return "opened_app" if rc == 0 else "open_app_failed"
 
     if t == "applescript_gmail_compose":
-        open_gmail_compose(); return "opened_gmail"
+        return EXEC.compose_email("", "", "", send=False)
 
     if t == "applescript_open_url":
         raw = slots.get("url", "")
-        # Heuristic from A: if user said an app name (e.g., "safari", "keynote"), open the app instead of searching
+        # If the user said an app name (e.g. "safari", "keynote"), open the app.
         app_guess = slot_app(raw)
         if app_guess and raw and "." not in raw and "://" not in raw:
-            rc = open_mac_app(app_guess)
+            rc = EXEC.open_app(app_guess)
             return "opened_app" if rc == 0 else "open_app_failed"
 
         url = slot_site(raw)  # alias → URL or normalized token
         parsed = urlparse(url)
         if not (parsed.scheme and parsed.netloc):
             url = f"https://www.google.com/search?q={quote(raw.strip())}"
-        return open_url_in_active_browser(url)
+        return EXEC.open_url(url)
 
     if t == "applescript_keynote_start":
-        start_keynote_slideshow(); return "opened_presentation"
+        # D2: Google Slides is the cross-platform presentation path.
+        return EXEC.start_presentation()
 
     if plan.get("intent") == "type_text":
         txt = (slots.get("text") or "").strip()
@@ -535,7 +354,13 @@ def apply_plan(plan: dict, slots: dict):
         return "typed_empty"
 
     if t == "hotkey":
-        pyautogui.hotkey(*plan["keys"]); return "hotkey"
+        keys = remap_intent_keys(plan.get("intent", ""), plan.get("keys", []))
+        if keys:
+            try:
+                pyautogui.hotkey(*keys)
+            except Exception as e:
+                print("hotkey error:", e); return "hotkey_failed"
+        return "hotkey"
     if t == "key":
         pyautogui.press(plan["key"]); return "key"
     if t == "scroll":
@@ -548,37 +373,29 @@ def apply_plan(plan: dict, slots: dict):
         return apply_plan(LAST_EXECUTED["plan"], LAST_EXECUTED["slots"])
 
     if t == "mailto_compose":
-        # Combined behavior: prefer Gmail web compose if any field present (A),
-        # but fall back to mailto URL (B) if Gmail compose fails.
+        # Prefer Gmail web compose; fall back to a mailto: URL if it fails.
         to = (slots.get("to") or "").strip()
         subject = (slots.get("subject") or "").strip()
         body = (slots.get("body") or "").strip()
-        if to or subject or body:
-            # try Gmail web compose in active browser
-            res = gmail_compose_in_active_browser(to, subject, body, send=False)
-            if res != "gmail_compose_opened":
-                # fallback to mailto URL in active browser
-                url = mailto_url(to, subject, body)
-                open_url_in_active_browser(url)
-                time.sleep(1.0)
-                return "mailto_composed"
-            return res
-        # Otherwise, open Gmail compose window (no preset fields)
-        open_gmail_compose()
-        return "opened_gmail"
+        res = EXEC.compose_email(to, subject, body, send=False)
+        if res != "gmail_compose_opened" and (to or subject or body):
+            EXEC.open_url(mailto_url(to, subject, body))
+            time.sleep(1.0)
+            return "mailto_composed"
+        return res
 
     return "noop"
 
 
 def execute_intent(intent: str, slots: dict):
-    # Server-level intents from A
+    # Server-level intents
     if intent == "set_browser":
-        browser = (slots.get("browser") or "").strip()
-        set_preferred_browser(browser)
+        # Demoted to a near-no-op (D1) — frontmost rule supersedes preference.
+        set_preferred_browser((slots.get("browser") or "").strip())
         return "browser_set"
 
     if intent == "compose_email":
-        return gmail_compose_in_active_browser(
+        return EXEC.compose_email(
             slots.get("to", ""),
             slots.get("subject", ""),
             slots.get("body", ""),
@@ -589,13 +406,27 @@ def execute_intent(intent: str, slots: dict):
         # one-shot send if fields provided; else send current compose
         to = slots.get("to"); subject = slots.get("subject"); body = slots.get("body")
         if any([to, subject, body]):
-            return gmail_compose_in_active_browser(to or "", subject or "", body or "", send=True)
+            return EXEC.compose_email(to or "", subject or "", body or "", send=True)
         try:
-            pyautogui.hotkey("command", "enter")
+            pyautogui.hotkey(primary_modifier(), "enter")  # Cmd/Ctrl+Enter
             return "gmail_sent"
         except Exception as e:
             print("gmail send hotkey error:", e)
             return "gmail_send_failed"
+
+    if intent == "new_tab":
+        # D1: new tab in the frontmost browser; if none is focused, open the
+        # default browser (which yields a fresh window/tab).
+        try:
+            if EXEC.frontmost_is_browser():
+                keys = remap_intent_keys("new_tab", KEYMAP.get("new_tab", {}).get("keys", ["command", "t"]))
+                pyautogui.hotkey(*keys)
+                return "new_tab"
+            EXEC.open_default_browser()
+            return "opened_browser"
+        except Exception as e:
+            print("new_tab error:", e)
+            return "new_tab_failed"
 
     global LAST_EXECUTED
     plan = KEYMAP.get(intent)
@@ -634,8 +465,17 @@ async def ws_handler(websocket):
                     res = execute_intent(intent, slots)
                     await websocket.send(json.dumps({"ok": True, "result": res, "via": how}))
                     continue
-                # LLM fallback
-                plan = ollama_route(text) or {}
+                # LLM fallback (fail-soft — PRD §8.6). A dead/missing Ollama
+                # must not crash or stall the socket; it degrades cleanly.
+                try:
+                    plan = ollama_route(text) or {}
+                except OllamaUnavailable:
+                    await websocket.send(json.dumps({"ok": False, "error": "nlu_failed:llm_unavailable"}))
+                    continue
+                except Exception as e:
+                    print("ollama_route error:", e)
+                    await websocket.send(json.dumps({"ok": False, "error": "nlu_failed:llm_error"}))
+                    continue
                 vr = validate_and_normalize_plan(plan)
                 err = None
                 action = None
@@ -714,7 +554,27 @@ async def ws_handler(websocket):
         print(f"[{now()}] 📴 client disconnected: {websocket.remote_address}")
 
 
+def print_startup_warnings():
+    """One-time loud warnings for unsupported/degraded environments (§8.5)."""
+    plat = detect_platform()
+    print(f"Platform: {plat} ({type(EXEC).__name__})")
+    if plat == "linux":
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+            print("⚠️  Wayland session detected — global input injection is "
+                  "blocked by the OS. Use an X11 session (or XWayland for X11 "
+                  "target apps). See PRD §10 (L-3).")
+        if is_wsl():
+            print("⚠️  WSL2 detected — hotkey injection into the Windows "
+                  "desktop is unreliable; WSL2 is not a supported target "
+                  "(PRD §10 L-4).")
+    if not probe_ollama():
+        print(f"⚠️  Ollama not reachable at {OLLAMA_URL} → local NLU only "
+              "(regex / keyword / TF-IDF). The LLM fallback is disabled until "
+              "Ollama is running — see setup.sh / setup.ps1.")
+
+
 async def main():
+    print_startup_warnings()
     print("Server listening on ws://0.0.0.0:8765")
     async with websockets.serve(ws_handler, "0.0.0.0", 8765, ping_interval=None):
         await asyncio.Future()

@@ -14,7 +14,10 @@
   "examples": ["subject", "body", "next field"]
 },
 
-  "open_gmail": { "examples": ["open gmail", "go to gmail", "open my email"] },
+  "open_gmail": {
+    "patterns": ["(?i)^(?:open|go\\s+to|check)\\s+(?:my\\s+)?(?:gmail|e-?mail|mail|inbox)$"],
+    "examples": ["open gmail", "go to gmail", "open my email"]
+  },
 
   "set_browser": {
     "patterns": [
@@ -64,6 +67,20 @@
     }
   },
 
+  "start_presentation": {
+    "patterns": [
+      "(?i)^(start|begin|open|play|launch|run)\\s+(?:the\\s+)?(presentation|slideshow|slide\\s*show|slides)$",
+      "(?i)^present(?:\\s+(?:the\\s+)?(?:slides?|deck|presentation))?$",
+      "(?i)^(?:go\\s+to\\s+)?google\\s+slides$"
+    ],
+    "examples": ["open presentation", "start presentation", "begin slideshow", "play slides", "present", "present slides", "google slides"]
+  },
+
+  "new_tab": {
+    "patterns": ["(?i)^(?:open\\s+(?:a\\s+)?(?:new\\s+)?tab|new\\s+tab)$"],
+    "examples": ["new tab", "open a new tab", "open a tab"]
+  },
+
   "open_url": {
     "patterns": ["(?i)^(open|go to|navigate to)\\s+(?P<url>[^\\s]+)$"],
     "examples": ["open twitter.com", "go to github", "navigate to notion"]
@@ -71,11 +88,10 @@
 
   "open_app": {
     "patterns": ["(?i)^(open|launch|start)\\s+(?P<app>.+)$"],
-    "examples": ["open chrome", "launch safari", "start keynote"]
+    "examples": ["open chrome", "launch safari", "start keynote", "open edge", "open brave", "open arc"]
   },
 
-  "new_tab": { "examples": ["new tab", "open a new tab"] },
-  "close_tab": { "examples": ["close tab"] },
+  "close_tab": { "examples": ["close tab", "close this tab"] },
   "next_tab": { "examples": ["next tab"] },
   "previous_tab": { "examples": ["previous tab"] },
   "reload_tab": { "examples": ["reload", "refresh"] },
@@ -106,16 +122,16 @@
   "underline": { "examples": ["underline"] },
 
   "find": { "examples": ["find", "search on page"] },
-  "find_next": { "examples": ["find next"] },
-  "find_previous": { "examples": ["find previous"] },
+  "find_next": { "patterns": ["(?i)^find\\s+next$"], "examples": ["find next"] },
+  "find_previous": { "patterns": ["(?i)^find\\s+(?:previous|prev)$"], "examples": ["find previous"] },
 
   "arrow_left": { "examples": ["left"] },
   "arrow_right": { "examples": ["right"] },
   "arrow_up": { "examples": ["up"] },
   "arrow_down": { "examples": ["down"] },
 
-  "word_left": { "examples": ["word left"] },
-  "word_right": { "examples": ["word right"] },
+  "word_left": { "patterns": ["(?i)^word\\s+left$"], "examples": ["word left"] },
+  "word_right": { "patterns": ["(?i)^word\\s+right$"], "examples": ["word right"] },
   "line_start": { "examples": ["line start", "home"] },
   "line_end": { "examples": ["line end", "end"] },
 
@@ -123,7 +139,6 @@
   "zoom_out": { "examples": ["zoom out"] },
   "zoom_reset": { "examples": ["reset zoom"] },
 
-  "start_presentation": { "examples": ["open presentation", "start presentation", "begin slideshow", "play slides"] },
   "exit_presentation": { "examples": ["exit presentation", "stop slideshow"] },
   "next_slide": { "examples": ["next slide", "advance slide", "go forward"] },
   "previous_slide": { "examples": ["previous slide", "go back slide"] },
@@ -131,7 +146,7 @@
   "last_slide": { "examples": ["last slide"] },
 
   "new_window": { "examples": ["new window"] },
-  "close_window": { "examples": ["close window"] },
+  "close_window": { "examples": ["close window", "close this window"] },
   "minimize_window": { "examples": ["minimize window"] },
   "switch_app": { "examples": ["switch app", "app switcher"] },
   "repeat_last": { "examples": ["repeat last", "do that again"] }
